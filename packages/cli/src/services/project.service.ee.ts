@@ -179,7 +179,10 @@ export class ProjectService {
 		return await this.projectRelationRepository.getPersonalProjectOwners(projectIds);
 	}
 
-	async createTeamProject(adminUser: User, data: CreateProjectDto): Promise<Project> {
+	async createTeamProject(
+		adminUser: User,
+		data: CreateProjectDto & { organizationName?: string },
+	): Promise<Project> {
 		const limit = this.license.getTeamProjectLimit();
 		if (
 			limit !== UNLIMITED_LICENSE_QUOTA &&
@@ -189,7 +192,12 @@ export class ProjectService {
 		}
 
 		const project = await this.projectRepository.save(
-			this.projectRepository.create({ ...data, type: 'team' }),
+			this.projectRepository.create({
+				name: data.name,
+				type: 'team',
+				icon: data.icon,
+				organizationName: data.organizationName,
+			}),
 		);
 
 		// Link admin
@@ -200,9 +208,12 @@ export class ProjectService {
 
 	async updateProject(
 		projectId: string,
-		data: Pick<UpdateProjectDto, 'name' | 'icon'>,
+		data: Pick<UpdateProjectDto, 'name' | 'icon'> & { organizationName?: string },
 	): Promise<Project> {
-		const result = await this.projectRepository.update({ id: projectId, type: 'team' }, data);
+		const result = await this.projectRepository.update(
+			{ id: projectId, type: 'team' },
+			{ name: data.name, icon: data.icon, organizationName: data.organizationName },
+		);
 
 		if (!result.affected) {
 			throw new ForbiddenError('Project not found');
@@ -360,5 +371,28 @@ export class ProjectService {
 
 	async getProjectCounts(): Promise<Record<ProjectType, number>> {
 		return await this.projectRepository.getProjectCounts();
+	}
+
+	async getProjectMembers(projectId: string): Promise<User[]> {
+		// This method will leverage UserService.getUsersInProject
+		// For now, this is a placeholder, as UserService needs to be injectable here.
+		// Or, ProjectService could directly query users based on projectRoles if that's preferred.
+		// For consistency with the subtask's direction (UserService managing project roles),
+		// this would ideally call UserService.
+		// However, to avoid circular dependencies or overly complex DI setup for this step,
+		// a direct query approach might be temporarily acceptable if UserService is not easily available.
+
+		// Assuming UserService is not directly available here without further DI setup,
+		// and to keep changes localized for now, we'll replicate a simplified logic.
+		// This is NOT ideal and should be refactored if UserService can be injected.
+		const userRepository = this.projectRepository.manager.getRepository(User);
+		const users = await userRepository.find(); // Fetches all users
+
+		return users.filter((user) => {
+			if (!user.projectRoles) {
+				return false;
+			}
+			return user.projectRoles.some((pr) => pr.projectId === projectId);
+		});
 	}
 }

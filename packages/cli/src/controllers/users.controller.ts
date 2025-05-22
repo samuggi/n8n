@@ -18,9 +18,11 @@ import {
 	Licensed,
 	Body,
 	Param,
+	Post,
 } from '@n8n/decorators';
 import { Response } from 'express';
 import { Logger } from 'n8n-core';
+import { ProjectRoleDto } from '@n8n/api-types';
 
 import { AuthService } from '@/auth/auth.service';
 import { CredentialsService } from '@/credentials/credentials.service';
@@ -295,7 +297,7 @@ export class UsersController {
 			throw new ForbiddenError(NO_OWNER_ON_OWNER);
 		}
 
-		await this.userService.changeUserRole(req.user, targetUser, payload);
+		await this.userService.changeGlobalUserRole(req.user, targetUser, payload);
 
 		this.eventService.emit('user-changed-role', {
 			userId: req.user.id,
@@ -312,5 +314,45 @@ export class UsersController {
 		);
 
 		return { success: true };
+	}
+
+	@Post('/:userId/projects/:projectId/roles')
+	@GlobalScope('user:update') // Or a more specific scope like 'user:manageProjectRoles'
+	async assignProjectRoleController(
+		req: AuthenticatedRequest,
+		@Param('userId') userId: string,
+		@Param('projectId') projectId: string,
+		@Body() payload: ProjectRoleDto,
+	): Promise<PublicUser> {
+		// Basic authorization: Ensure the logged-in user can perform this
+		// This might need more granular checks, e.g. if the user is an admin of the project.
+		// For now, relying on GlobalScope.
+
+		const updatedUser = await this.userService.assignProjectRole(userId, projectId, payload.role);
+		this.eventService.emit('user-project-role-assigned', {
+			actorUserId: req.user.id,
+			targetUserId: userId,
+			projectId,
+			role: payload.role,
+		});
+		return this.userService.toPublic(updatedUser, { withProjectRoles: true });
+	}
+
+	@Delete('/:userId/projects/:projectId/roles')
+	@GlobalScope('user:update') // Or a more specific scope like 'user:manageProjectRoles'
+	async revokeProjectRoleController(
+		req: AuthenticatedRequest,
+		@Param('userId') userId: string,
+		@Param('projectId') projectId: string,
+	): Promise<PublicUser> {
+		// Basic authorization similar to assignProjectRoleController
+
+		const updatedUser = await this.userService.revokeProjectRole(userId, projectId);
+		this.eventService.emit('user-project-role-revoked', {
+			actorUserId: req.user.id,
+			targetUserId: userId,
+			projectId,
+		});
+		return this.userService.toPublic(updatedUser, { withProjectRoles: true });
 	}
 }

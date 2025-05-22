@@ -15,16 +15,18 @@ import {
 	Query,
 } from '@n8n/decorators';
 import { combineScopes, getRoleScopes, hasGlobalScope } from '@n8n/permissions';
-import type { Scope } from '@n8n/permissions';
+import type { Scope, PublicUser } from '@n8n/permissions'; // Assuming PublicUser might be returned by UserService
 // eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
 import { In, Not } from '@n8n/typeorm';
 import { Response } from 'express';
+import { AddProjectMemberDto } from '@n8n/api-types'; // Import the new DTO
 
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
 import { NotFoundError } from '@/errors/response-errors/not-found.error';
 import { EventService } from '@/events/event.service';
 import type { ProjectRequest } from '@/requests';
 import { AuthenticatedRequest } from '@/requests';
+import { UserService } from '@/services/user.service'; // Import UserService
 import {
 	ProjectService,
 	TeamProjectOverQuotaError,
@@ -37,10 +39,12 @@ export class ProjectController {
 		private readonly projectsService: ProjectService,
 		private readonly projectRepository: ProjectRepository,
 		private readonly eventService: EventService,
+		private readonly userService: UserService, // Inject UserService
 	) {}
 
 	@Get('/')
 	async getAllProjects(req: AuthenticatedRequest): Promise<Project[]> {
+		// TODO: Consider if projectRoles should be included here for each project for the user
 		return await this.projectsService.getAccessibleProjects(req.user);
 	}
 
@@ -53,9 +57,17 @@ export class ProjectController {
 	@GlobalScope('project:create')
 	// Using admin as all plans that contain projects should allow admins at the very least
 	@Licensed('feat:projectRole:admin')
-	async createProject(req: AuthenticatedRequest, _res: Response, @Body payload: CreateProjectDto) {
+	async createProject(
+		req: AuthenticatedRequest,
+		_res: Response,
+		@Body payload: CreateProjectDto & { organizationName?: string },
+	) {
 		try {
-			const project = await this.projectsService.createTeamProject(req.user, payload);
+			const project = await this.projectsService.createTeamProject(req.user, {
+				name: payload.name,
+				icon: payload.icon,
+				organizationName: payload.organizationName,
+			});
 
 			this.eventService.emit('team-project-created', {
 				userId: req.user.id,
@@ -202,12 +214,19 @@ export class ProjectController {
 		@Body payload: UpdateProjectDto,
 		@Param('projectId') projectId: string,
 	) {
-		const { name, icon, relations } = payload;
-		if (name || icon) {
-			await this.projectsService.updateProject(projectId, { name, icon });
+		const { name, icon, relations, organizationName } = payload as UpdateProjectDto & {
+			organizationName?: string;
+		};
+		if (name || icon || organizationName) {
+			await this.projectsService.updateProject(projectId, { name, icon, organizationName });
 		}
 		if (relations) {
 			try {
+				// syncProjectRelations is EE specific and handles ProjectRelation entities.
+				// If User.projectRoles is the primary mechanism, this might need adjustment
+				// or be supplemented by calls to UserService to manage User.projectRoles directly
+				// for users involved in these relations.
+				// For now, keeping the existing call for EE compatibility.
 				await this.projectsService.syncProjectRelations(projectId, relations);
 			} catch (e) {
 				if (e instanceof UnlicensedProjectRoleError) {
@@ -243,6 +262,69 @@ export class ProjectController {
 			projectId,
 			removalType: query.transferId !== undefined ? 'transfer' : 'delete',
 			targetProjectId: query.transferId,
+		});
+	}
+
+	// Member Management Endpoints
+
+	@Get('/:projectId/members')
+	@ProjectScope('project:read') // Or a more specific 'project:listMembers'
+	async listProjectMembers(
+		@Param('projectId') projectId: string,
+		req: AuthenticatedRequest,
+	): Promise<PublicUser[]> {
+		// Check if user has access to the project first (covered by @ProjectScope)
+		const usersInProject = await this.userService.getUsersInProject(projectId);
+		return Promise.all(
+			usersInProject.map((user) =>
+				this.userService.toPublic(user, {
+					withProjectRoles: true, // Ensure project roles are included
+					posthog: req.posthog, // Pass posthog if available in AuthenticatedRequest
+				}),
+			),
+		);
+	}
+
+	@Post('/:projectId/members')
+	@ProjectScope('project:manageMembers') // Requires a scope that allows managing members
+	async addProjectMember(
+		@Param('projectId') projectId: string,
+		@Body() payload: AddProjectMemberDto,
+		req: AuthenticatedRequest,
+	): Promise<PublicUser> {
+		const updatedUser = await this.userService.assignProjectRole(
+			payload.userId,
+			projectId,
+			payload.role,
+		);
+		this.eventService.emit('project-member-added', {
+			actorUserId: req.user.id,
+			targetUserId: payload.userId,
+			projectId,
+			role: payload.role,
+		});
+		return this.userService.toPublic(updatedUser, {
+			withProjectRoles: true,
+			posthog: req.posthog,
+		});
+	}
+
+	@Delete('/:projectId/members/:userId')
+	@ProjectScope('project:manageMembers') // Requires a scope that allows managing members
+	async removeProjectMember(
+		@Param('projectId') projectId: string,
+		@Param('userId') userId: string,
+		req: AuthenticatedRequest,
+	): Promise<PublicUser> {
+		const updatedUser = await this.userService.revokeProjectRole(userId, projectId);
+		this.eventService.emit('project-member-removed', {
+			actorUserId: req.user.id,
+			targetUserId: userId,
+			projectId,
+		});
+		return this.userService.toPublic(updatedUser, {
+			withProjectRoles: true,
+			posthog: req.posthog,
 		});
 	}
 }

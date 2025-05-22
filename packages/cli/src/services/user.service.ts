@@ -6,6 +6,7 @@ import { getGlobalScopes, type AssignableGlobalRole } from '@n8n/permissions';
 import { Logger } from 'n8n-core';
 import type { IUserSettings } from 'n8n-workflow';
 import { UnexpectedError } from 'n8n-workflow';
+import { NotFoundError } from '@n8n/errors';
 
 import { InternalServerError } from '@/errors/response-errors/internal-server.error';
 import { EventService } from '@/events/event.service';
@@ -61,9 +62,10 @@ export class UserService {
 			inviterId?: string;
 			posthog?: PostHogClient;
 			withScopes?: boolean;
+			withProjectRoles?: boolean;
 		},
 	) {
-		const { password, updatedAt, authIdentities, ...rest } = user;
+		const { password, updatedAt, authIdentities, projectRoles, ...rest } = user;
 
 		const ldapIdentity = authIdentities?.find((i) => i.providerType === 'ldap');
 
@@ -88,6 +90,10 @@ export class UserService {
 		// TODO: resolve these directly in the frontend
 		if (options?.withScopes) {
 			publicUser.globalScopes = getGlobalScopes(user);
+		}
+
+		if (options?.withProjectRoles) {
+			publicUser.projectRoles = projectRoles ?? null;
 		}
 
 		return publicUser;
@@ -235,7 +241,7 @@ export class UserService {
 		return { usersInvited, usersCreated: toCreateUsers.map(({ email }) => email) };
 	}
 
-	async changeUserRole(user: User, targetUser: User, newRole: RoleChangeRequestDto) {
+	async changeGlobalUserRole(user: User, targetUser: User, newRole: RoleChangeRequestDto) {
 		return await this.userRepository.manager.transaction(async (trx) => {
 			await trx.update(User, { id: targetUser.id }, { role: newRole.newRoleName });
 
@@ -247,6 +253,68 @@ export class UserService {
 			if (adminDowngradedToMember) {
 				await this.publicApiKeyService.removeOwnerOnlyScopesFromApiKeys(targetUser, trx);
 			}
+		});
+	}
+
+	async assignProjectRole(userId: string, projectId: string, role: string): Promise<User> {
+		const user = await this.userRepository.findOneBy({ id: userId });
+
+		if (!user) {
+			throw new NotFoundError(`User with ID "${userId}" not found`);
+		}
+
+		let projectRoles = user.projectRoles ?? [];
+		const existingRoleIndex = projectRoles.findIndex((pr) => pr.projectId === projectId);
+
+		if (existingRoleIndex !== -1) {
+			projectRoles[existingRoleIndex].role = role;
+		} else {
+			projectRoles.push({ projectId, role });
+		}
+
+		user.projectRoles = projectRoles;
+		return this.userRepository.save(user);
+	}
+
+	async revokeProjectRole(userId: string, projectId: string): Promise<User> {
+		const user = await this.userRepository.findOneBy({ id: userId });
+
+		if (!user) {
+			throw new NotFoundError(`User with ID "${userId}" not found`);
+		}
+
+		if (!user.projectRoles) {
+			return user; // Or throw error if role is expected
+		}
+
+		user.projectRoles = user.projectRoles.filter((pr) => pr.projectId !== projectId);
+		return this.userRepository.save(user);
+	}
+
+	async getProjectRoles(userId: string): Promise<Array<{ projectId: string; role: string }>> {
+		const user = await this.userRepository.findOneBy({ id: userId });
+
+		if (!user) {
+			throw new NotFoundError(`User with ID "${userId}" not found`);
+		}
+
+		return user.projectRoles ?? [];
+	}
+
+	async getUsersInProject(projectId: string, role?: string): Promise<User[]> {
+		// This is a basic implementation. For larger datasets, a more optimized query would be needed.
+		// This might involve using database-specific JSON functions if TypeORM doesn't support this directly.
+		const users = await this.userRepository.find(); // Fetches all users
+
+		return users.filter((user) => {
+			if (!user.projectRoles) {
+				return false;
+			}
+			const projectRole = user.projectRoles.find((pr) => pr.projectId === projectId);
+			if (!projectRole) {
+				return false;
+			}
+			return role ? projectRole.role === role : true;
 		});
 	}
 }
