@@ -21,7 +21,7 @@ import type { ProjectRelation } from './project-relation';
 import type { SharedCredentials } from './shared-credentials';
 import type { SharedWorkflow } from './shared-workflow';
 import type { IPersonalizationSurveyAnswers } from './types-db';
-import { lowerCaser, objectRetriever } from '../utils/transformers';
+import { lowerCaser, objectRetriever, arrayRetriever } from '../utils/transformers';
 import { NoUrl } from '../utils/validators/no-url.validator';
 import { NoXss } from '../utils/validators/no-xss.validator';
 
@@ -68,6 +68,12 @@ export class User extends WithTimestamps implements IUser, AuthPrincipal {
 
 	@Column({ type: String })
 	role: GlobalRole;
+
+	@JsonColumn({
+		nullable: true,
+		transformer: arrayRetriever,
+	})
+	projectRoles: Array<{ projectId: string; role: string }> | null;
 
 	@OneToMany('AuthIdentity', 'user')
 	authIdentities: AuthIdentity[];
